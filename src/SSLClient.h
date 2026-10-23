@@ -384,6 +384,17 @@ public:
      */
     void setVerificationTime(uint32_t days, uint32_t seconds);
 
+    /**
+     * @brief Set whether to bypass certificate verification (insecure mode).
+     * When set to true, the SSL client will accept any certificate presented by the server.
+     */
+    void setInsecure(bool insecure = true);
+
+    /**
+     * @brief Check whether certificate verification is currently bypassed.
+     */
+    bool getInsecure() const { return m_insecure; }
+
 private:
     /** @brief Returns an instance of m_client that is polymorphic and can be used by SSLClientImpl */
     Client& get_arduino_client() { return m_client; }
@@ -446,6 +457,8 @@ private:
     const int m_analog_pin;
     // store whether to enable debug logging
     const DebugLevel m_debug;
+    // store whether certificate verification is disabled
+    bool m_insecure;
     // store if we are connected in bearssl or not
     bool m_is_connected;
     // store the timeout for SSL internals
@@ -466,7 +479,7 @@ private:
      * As a rule of thumb SSLClient will fail if it does not have at least 8000 bytes when starting a
      * connection.
      */
-    unsigned char m_iobuf[2048];
+    unsigned char m_iobuf[4096];
     // store the index of where we are writing in the buffer
     // so we can send our records all at once to prevent
     // weird timing issues

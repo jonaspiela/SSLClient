@@ -20,6 +20,30 @@
 
 #include "SSLClient.h"
 
+static void insecure_start_chain(const br_x509_class **ctx, const char *server_name) {
+    (void)server_name;
+    br_x509_minimal_vtable.start_chain(ctx, NULL);
+}
+
+static unsigned insecure_end_chain(const br_x509_class **ctx) {
+    br_x509_minimal_context *cc = (br_x509_minimal_context *)(void *)ctx;
+    if (cc->num_certs == 0) {
+        return BR_ERR_X509_EMPTY_CHAIN;
+    }
+    cc->err = BR_ERR_X509_OK;
+    return 0;
+}
+
+static const br_x509_class insecure_x509_vtable = {
+    sizeof(br_x509_minimal_context),
+    insecure_start_chain,
+    br_x509_minimal_vtable.start_cert,
+    br_x509_minimal_vtable.append,
+    br_x509_minimal_vtable.end_cert,
+    insecure_end_chain,
+    br_x509_minimal_vtable.get_pkey
+};
+
 /* see SSLClient.h */
 SSLClient::SSLClient(   Client& client, 
                         const br_x509_trust_anchor *trust_anchors, 
@@ -32,6 +56,7 @@ SSLClient::SSLClient(   Client& client,
     , m_max_sessions(max_sessions)
     , m_analog_pin(analog_pin)
     , m_debug(debug)
+    , m_insecure(false)
     , m_is_connected(false)
     , m_write_idx(0)
     , m_br_last_state(0) {
@@ -40,12 +65,16 @@ SSLClient::SSLClient(   Client& client,
     // zero the iobuf just in case it's still garbage
     memset(m_iobuf, 0, sizeof m_iobuf);
     // initlalize the various bearssl libraries so they're ready to go when we connect
-    br_client_init_TLS12_only(&m_sslctx, &m_x509ctx, trust_anchors, trust_anchors_num);
+    // br_client_init_TLS12_only(&m_sslctx, &m_x509ctx, trust_anchors, trust_anchors_num);
     // comment the above line and uncomment the line below if you're having trouble connecting over SSL
-    // br_ssl_client_init_full(&m_sslctx, &m_x509ctx, m_trust_anchors, m_trust_anchors_num);
+    br_ssl_client_init_full(&m_sslctx, &m_x509ctx, trust_anchors, trust_anchors_num);
     // check if the buffer size is half or full duplex
     constexpr auto duplex = sizeof m_iobuf <= BR_SSL_BUFSIZE_MONO ? 0 : 1;
     br_ssl_engine_set_buffer(&m_sslctx.eng, m_iobuf, sizeof m_iobuf, duplex);
+
+    if (trust_anchors == nullptr || trust_anchors_num == 0) {
+        setInsecure(true);
+    }
 }
 
 /* see SSLClient.h*/
@@ -56,6 +85,7 @@ int SSLClient::connect(IPAddress ip, uint16_t port) {
         m_warn("Arduino client is already connected? Continuing anyway...", func_name);
     // reset indexs for saftey
     m_write_idx = 0;
+    m_br_last_state = 0;
     // Warning for security
     m_warn("Using a raw IP Address for an SSL connection bypasses some important verification steps. You should use a domain name (www.google.com) whenever possible.", func_name);
     // first we need our hidden client member to negotiate the socket for us,
@@ -77,6 +107,7 @@ int SSLClient::connect(const char *host, uint16_t port) {
         m_warn("Arduino client is already connected? Continuing anyway...", func_name);
     // reset indexs for saftey
     m_write_idx = 0;
+    m_br_last_state = 0;
     // first we need our hidden client member to negotiate the socket for us,
     // since most times socket functionality is implemented in hardeware.
     if (!get_arduino_client().connect(host, port)) {
@@ -310,6 +341,18 @@ void SSLClient::setVerificationTime(uint32_t days, uint32_t seconds) {
     br_x509_minimal_set_time(&m_x509ctx, days, seconds);
 }
 
+/* see SSLClient.h */
+void SSLClient::setInsecure(bool insecure) {
+    m_insecure = insecure;
+    if (m_insecure) {
+        m_x509ctx.vtable = &insecure_x509_vtable;
+        br_ssl_engine_set_x509(&m_sslctx.eng, (const br_x509_class **)&m_x509ctx);
+    } else {
+        m_x509ctx.vtable = &br_x509_minimal_vtable;
+        br_ssl_engine_set_x509(&m_sslctx.eng, (const br_x509_class **)&m_x509ctx);
+    }
+}
+
 bool SSLClient::m_soft_connected(const char* func_name) {
     // check if the socket is still open and such
     if (getWriteError()) {
@@ -339,6 +382,10 @@ int SSLClient::m_start_ssl(const char* host, SSLSession* ssl_ses) {
     for (uint8_t i = 0; i < sizeof rng_seeds; i++) 
         rng_seeds[i] = static_cast<uint8_t>(analogRead(m_analog_pin));
     br_ssl_engine_inject_entropy(&m_sslctx.eng, rng_seeds, sizeof rng_seeds);
+    if (m_insecure) {
+        m_x509ctx.vtable = &insecure_x509_vtable;
+        br_ssl_engine_set_x509(&m_sslctx.eng, (const br_x509_class **)&m_x509ctx);
+    }
     // inject session parameters for faster reconnection, if we have any
     if(ssl_ses != nullptr) {
         br_ssl_engine_set_session_parameters(&m_sslctx.eng, ssl_ses->to_br_session());
@@ -480,7 +527,11 @@ unsigned SSLClient::m_update_engine() {
             int wlen;
 
             buf = br_ssl_engine_sendrec_buf(&m_sslctx.eng, &len);
+            m_info("W5500: trying to write bytes: ", func_name);
+            m_info(len, func_name);
             wlen = get_arduino_client().write(buf, len);
+            m_info("W5500: actual written bytes: ", func_name);
+            m_info(wlen, func_name);
             get_arduino_client().flush();
             if (wlen <= 0) {
                 // if the arduino client encountered an error
